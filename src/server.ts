@@ -2,6 +2,7 @@ import express from "express";
 import dotenv from "dotenv";
 import ConfluenceApi from "./api/confluenceApi";
 import SearchService from "./services/searchService";
+import ChatGPTService from "./services/chatgptService";
 
 dotenv.config();
 
@@ -25,6 +26,7 @@ if (!baseUrl || !username || !token) {
 // Initialiser l'API Confluence et le service de recherche
 const confluenceApi = new ConfluenceApi(baseUrl, username, token);
 const searchService = new SearchService(confluenceApi);
+const chatgptService = new ChatGPTService();
 
 // Middleware pour analyser les requêtes JSON
 app.use(express.json());
@@ -63,6 +65,68 @@ app.get<{}, any, any, { query?: string }>("/search", async (req, res) => {
   } catch (error) {
     console.error("❌ Error during search:", error);
     res.status(500).json({ error: "Failed to perform search" });
+  }
+});
+
+app.post<{}, any, any, { query?: string }>("/ask", async (req, res) => {
+  const { question } = req.body;
+
+  if (!question || typeof question !== "string") {
+    res.status(400).json({
+      error: "Veuillez fournir une question valide sous forme de texte.",
+    });
+    return;
+  }
+
+  try {
+    // Étape 1 : Analyse de la question
+    const keywords = await chatgptService.analyzeQuestion(question);
+
+    console.log(`🔍 Mots-clés : ${keywords}`);
+
+    // Nettoyage et simplification des mots-clés
+    const cleanKeywords = keywords
+      .replace(/[^a-zA-ZÀ-ÿ\s]/g, "") // Supprime les caractères spéciaux
+      .split(/\s+/) // Divise en mots
+      .filter((word) => word.length > 2) // Élimine les mots trop courts
+      .join(" OR ");
+
+    console.log(`🔍 Mots-clés nettoyés : ${cleanKeywords}`);
+
+    // Étape 2 : Recherche dans Confluence
+    const cql = `(title~"${cleanKeywords}*" OR text~"${cleanKeywords}*")`;
+    const results = await searchService.search(cql);
+
+    if (!results || results.length === 0) {
+      console.log("❌ Aucun résultat trouvé dans Confluence.");
+      res.json({
+        answer:
+          "Il semble que Confluence n’ait retourné aucun résultat pertinent pour cette question.",
+      });
+      return;
+    }
+
+    // Étape 3 : Préparation des données pour ChatGPT
+    const pageContents = results.map(
+      (result: any) =>
+        `Titre : ${result.title}\nURL : ${result.url}\nExtrait : ${
+          result.excerpt || "Aucun extrait disponible."
+        }`
+    );
+
+    console.log("📝 Contenus préparés pour ChatGPT :", pageContents);
+
+    // Étape 4 : Génération de la réponse
+    const answer = await chatgptService.synthesizeResponse(
+      question,
+      pageContents
+    );
+    res.json({ answer });
+  } catch (error) {
+    console.error("❌ Erreur lors du traitement de la question :", error);
+    res.status(500).json({
+      error: "Une erreur est survenue lors du traitement de la question.",
+    });
   }
 });
 
